@@ -1,4 +1,4 @@
-<?php namespace cryptofx;
+<?php namespace Vsb;
 use DB;
 use Log;
 use App\Histo;
@@ -11,6 +11,7 @@ use App\User;
 use App\UserTune;
 use App\UserTunePrice;
 use App\UserTuneHisto;
+use App\Events\PriceTuneEvent;
 use App\UserMeta;
 use App\Instrument;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
@@ -24,7 +25,7 @@ class DataTune{
             Log::debug('wrong tune user, no meta');
             return $data;
         }
-        if($data instanceof Price){ // price data
+        // if($data instanceof Price){ // price data
 
             $ret = UserTunePrice::where('instrument_id',$pair->id)
                 ->where('time',$data->time)
@@ -107,13 +108,22 @@ class DataTune{
                     $corrida->gone = $newValue;
                     $newValue += 4*abs($smoothing);
                 }
-                $utp = UserTunePrice::firstOrCreate([
+
+                // $utp = UserTunePrice::firstOrCreate([
+                //     'user_id'=>$user->id,
+                //     'instrument_id'=>$pair->id,
+                //     'time'=>$data->time,
+                //     'price'=>$newValue,
+                //     'price_id'=>$data->id
+                // ]);
+                $utp = [
                     'user_id'=>$user->id,
                     'instrument_id'=>$pair->id,
                     'time'=>$data->time,
                     'price'=>$newValue,
-                    'price_id'=>$data->id
-                ]);
+                    // 'price_id'=>$data->id
+                ];
+                event(new PriceTuneEvent($utp));
                 $usersFollowers = UserMeta::where('meta_name','subscribe_follow_trade#'.$corrida->deal_id)->get();
                 $corridaf = $corridaArr;
                 foreach($usersFollowers as $userm){
@@ -128,21 +138,16 @@ class DataTune{
                                 'meta_value'=>json_encode($corridaf)
                             ]);
                         }
-                        $ret = UserTunePrice::create([
-                            'user_id'=>$userm->user_id,
-                            'instrument_id'=>$pair->id,
-                            'time'=>$data->time,
-                            'price'=>$newValue,
-                            'price_id'=>$data->id
-                        ]);
+                        $utp['user_id']=$userm->user_id;
+                        event(new PriceTuneEvent($utp));
                     }
             }
             catch(\Exception $e){
                 Log::error('Tune object:'.$e->getMessage());
             }
             $userMeta->update(['meta_value'=>json_encode($corrida)]);
-        }
-        else Log::debug('not instance of Price');
+        // }
+        // else Log::debug('not instance of Price');
         return is_null($ret)?$data:$ret;
     }
     public static function smooth($price,$level,$smoothing){

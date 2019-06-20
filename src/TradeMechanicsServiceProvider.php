@@ -25,7 +25,7 @@ class TradeMechanicsServiceProvider extends LaravelServiceProvider {
     }
     public function registerServices(){
         $this->app->singleton('test.locations', function ($app) {
-            return new LocationManager($app);
+            return new DealManager($app);
         });
     }
 

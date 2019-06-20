@@ -1,5 +1,4 @@
-<?php
-namespace cryptofx;
+<?php namespace Vsb;
 use DB;
 use Log;
 use App\Deal;
@@ -29,157 +28,153 @@ class DealMechanic{
             :self::usual($dealInput,$price);
     }
     public static function forex(Deal $dealInput,$tick){
-        DB::beginTransaction();
-        try{
-            $deal = Deal::with(['instrument','account','user'])->lockForUpdate()->find($dealInput->id);
-            if(is_null($deal)){
-                DB::commit();
+        $deal = Deal::find($dealInput->id);
+        $user = User::find($deal->user_id);
+        // lot * pips = $pipsMove
+        $instrument = Instrument::find($deal->instrument_id);
+        $ig = InstrumentGroup::find($user->pairgroup);
+        // check if the base currency
+        $crossExchange = 1;
+        if($instrument->to->code!='USD'){
+            $baseCurrency = Currency::where('code','USD')->first();
+            $cross = Instrument::where('from_currency_id',$instrument->to->id)->where('to_currency_id',$baseCurrency->id)->first();
+            if(is_null($cross)){
+                Event::create(['object_type'=>'error','object_id'=>1,'user_id'=>$deal->user_id,'type'=>'error']);
                 return;
             }
-            if(floatval($deal->close_price) == floatval($tick->price)){
-                DB::commit();
+            if(is_null($cross->price)){
+                if(is_null(Event::where('object_type','error')->where('object_id',2)->where('user_id',$deal->user_id)->where('type','error')->first()))
+                    Event::create(['object_type'=>'error','object_id'=>2,'user_id'=>$deal->user_id,'type'=>'error']);
                 return;
             }
-            if($deal->status_id==20) {
-                DB::commit();
-                return;
+            $crossExchange = floatval($cross->price);
+        }
+        $account = Account::find($deal->account_id);
+
+        $dealDescription = '';
+        $price = floatval($tick->price);
+        $tradeAmount = floatval($deal->amount);
+
+        if($deal->status_id==30){//delayed
+            $atprice = floatval($deal->open_price);
+            $lastprice = floatval($deal->close_price);
+            if(
+                ( $lastprice>$atprice && $atprice>=$price )// && $tick->volation==-1)
+                                    ||
+                ( $lastprice<$atprice && $atprice<=$price )//&& $tick->volation==1)
+            ){
+                $deal->update(["status_id"=>10]);
+                DealHistory::create([
+                    'deal_id'=>$deal->id,
+                    'old_status_id'=>$deal->status_id,
+                    'new_status_id'=>10,
+                    'changed_user_id'=>$user->id,
+                    'description'=>'Delayed deal is opened now'
+                ]);
+                $deal->events()->create(['type'=>'open','user_id'=>$deal->user_id]);
             }
-            // lot * pips = $pipsMove
-            $instrument = $deal->instrument;
-            $user = $deal->user;
-            $account = $deal->account;
-            $ig = InstrumentGroup::find($user->pairgroup);
-            // check if the base currency
-            $crossExchange = 1;
-            if($instrument->to->code!='USD'){
-                $baseCurrency = Currency::where('code','USD')->first();
-                $cross = Instrument::where('from_currency_id',$instrument->to->id)->where('to_currency_id',$baseCurrency->id)->first();
-                if(is_null($cross)){
-                    Event::create(['object_type'=>'error','object_id'=>1,'user_id'=>$deal->user_id,'type'=>'error']);
-                    DB::commit();
-                    return;
-                }
-                if(is_null($cross->price)){
-                    if(is_null(Event::where('object_type','error')->where('object_id',2)->where('user_id',$deal->user_id)->where('type','error')->first())){
-                        Event::create(['object_type'=>'error','object_id'=>2,'user_id'=>$deal->user_id,'type'=>'error']);
-                        DB::commit();
-                        return;
+        }
+        if($deal->status_id==10){//opened
+            $swap = floatval($ig->dayswap)/100;
+            if($swap>0){
+                $todayTimestamp = time();
+                $todayTimestamp = $todayTimestamp - ($todayTimestamp%(24*60*60));
+                if( ($deal->created_at->timestamp - ($deal->created_at->timestamp%(24*60*60))) < $todayTimestamp){
+                    $checkMetaName = 'trade#'.$deal->id."_swap_".$todayTimestamp;
+                    $checkMeta  = $user->meta()->where('meta_name',$checkMetaName)->first();
+                    if(is_null($checkMeta)){
+                        $value = floatval($deal->invested)*floatval($deal->multiplier)*$swap;
+                        if($value>0){
+                            $trx = new TransactionController();
+                            $user->meta()->create(['meta_name'=>$checkMetaName,'meta_value'=>$value]);
+                            $trx->makeTransaction([
+                                'account'=>$account->id,
+                                'type'=>'swap',
+                                'user' => $user,
+                                'merchant'=>'1',
+                                'amount'=>$value,
+                            ]);
+                        }
                     }
                 }
-                $crossExchange = floatval($cross->price);
             }
-            $dealDescription = '';
-            $price = floatval($tick->price);
-            $tradeAmount = floatval($deal->amount);
+            // $pipsCount = floor((floatval($price)-floatval($deal->close_price))/$pips) +((floatval($price)-floatval($deal->close_price)>=0)?0:1);
+            $pips = floatval($instrument->pips);
+            $lot = floatval($deal->lot);
+            $open = floatval($deal->open_price);
+            $pipsCount = intval(($price-$open)/$pips);
+            $volume = floatval($deal->volume);
+            $contract = $volume*$lot;
+            $direction = intval($deal->direction);
+            $profit = $direction*( ($contract*$price) - ($contract*$open) );
+            $profit *= $crossExchange;
+            $invested = floatval($deal->invested);
 
-            if($deal->status_id==30){//delayed
-                $atprice = floatval($deal->open_price);
-                $lastprice = floatval($deal->close_price);
-                if(
-                    ( $lastprice>$atprice && $atprice>=$price )// && $tick->volation==-1)
-                                        ||
-                    ( $lastprice<$atprice && $atprice<=$price )//&& $tick->volation==1)
-                ){
-                    $deal->update(["status_id"=>10]);
-                    DealHistory::create([
-                        'deal_id'=>$deal->id,
-                        'old_status_id'=>$deal->status_id,
-                        'new_status_id'=>10,
-                        'changed_user_id'=>$user->id,
-                        'description'=>'Delayed deal is opened now'
+            $marginCall = $invested*($user->margincall?$user->margincall:20)/100;
+            $stopOut = $invested*($user->stopout?$user->stopout:$ig->stopout)/100;
+            if($profit>0)$deal->volation=1;
+            else if($profit<0)$deal->volation=-1;
+            $deal->profit = $profit;
+            $deal->close_price = $price;
+            // if($profit!=0){
+            //     Log::debug("{$user->title}\t#{$deal->id} {$deal->instrument->title}\tvolume[{$tradeAmount}x{$deal->multiplier}/ {$lot}]: {$volume} pipCounts[{$price} - {$deal->close_price} / {$pips}]: {$pipsCount} cross: {$crossExchange} min: ".self::$minMove." profit: {$profit}");
+            //     $account->amount+=$profit;
+            //     $account->save();
+            // }
+            // Log::debug('Forex #'.$dealInput->id.' lot: '.$lot.' cross: '.$crossExchange.' volume: '.($tradeAmount*$deal->multiplier).' pips: '.($deal->direction*(floatval($price)-floatval($deal->close_price))).' trade:'.$profit.' Balance: '.$account->amount);
+            $dealController = new \App\Http\Controllers\DealController();
+            if($deal->stop_low>0){
+                if($direction > 0 && $price<=$deal->stop_low){
+                    $deal->status_id = 20;
+                    $dealController->closeDeal($user,$deal,$price,'Stop lost signal');
+                }
+                else if($direction < 0 && $price>=$deal->stop_low){
+                    $deal->status_id = 20;
+                    $dealController->closeDeal($user,$deal,$price,'Stop lost signal');
+                }
+            }
+            if($deal->stop_high>0){
+                if($direction > 0 && $price>=$deal->stop_high ){
+                    $deal->status_id = 20;
+                    $dealController->closeDeal($user,$deal,$price,'Take profit signal');
+                }
+                else if($direction < 0 && $price<=$deal->stop_high ){
+                    $deal->status_id = 20;
+                    $dealController->closeDeal($user,$deal,$price,'Take profit signal');
+                }
+            }
+            if($invested+$profit < $marginCall){
+                //marginCall Event
+                $mcum = $user->meta()->where('meta_name','margincall_'.$deal->id)->first();
+                if(is_null($mcum)){
+                    $deal->events()->create(['type'=>'margincall','user_id'=>$deal->user_id]);
+                    $user->meta()->create([
+                        'meta_name'=>'margincall_'.$deal->id,
+                        'meta_value'=>1
                     ]);
-                    $deal->events()->create(['type'=>'open','user_id'=>$deal->user_id]);
                 }
-            }
-            if($deal->status_id==10){//opened
-                $swap = floatval($ig->dayswap)/100;
-                if($swap>0){
-                    $todayTimestamp = time();
-                    $todayTimestamp = $todayTimestamp - ($todayTimestamp%(24*60*60));
-                    if( ($deal->created_at->timestamp - ($deal->created_at->timestamp%(24*60*60))) < $todayTimestamp){
-                        $checkMetaName = 'trade#'.$deal->id."_swap_".$todayTimestamp;
-                        $checkMeta  = $user->meta()->where('meta_name',$checkMetaName)->first();
-                        if(is_null($checkMeta)){
-                            $value = floatval($deal->invested)*floatval($deal->multiplier)*$swap;
-                            if($value>0){
-                                $trx = new TransactionController();
-                                $user->meta()->create(['meta_name'=>$checkMetaName,'meta_value'=>$value]);
-                                $trx->makeTransaction([
-                                    'account'=>$account->id,
-                                    'type'=>'swap',
-                                    'user' => $user,
-                                    'merchant'=>'1',
-                                    'amount'=>$value,
-                                ]);
-                            }
-                        }
-                    }
-                }
-                // $pipsCount = floor((floatval($price)-floatval($deal->close_price))/$pips) +((floatval($price)-floatval($deal->close_price)>=0)?0:1);
-                $pips = floatval($instrument->pips);
-                $lot = floatval($instrument->lot);
-                $open = floatval($deal->open_price);
-                $pipsCount = intval(($price-$open)/$pips);
-                $volume = floatval($deal->volume);
-                $contract = $volume*$lot;
-                $direction = intval($deal->direction);
-                // $profit = $lot*$volume*$pipsCount*$pips;
-                $profit = $direction*( ($contract*$price) - ($contract*$open) );
-                $profit *= $crossExchange;
 
-                if($profit>0)$deal->volation=1;
-                else if($profit<0)$deal->volation=-1;
-                $deal->profit = $profit;
-                $deal->close_price = $price;
-                // if($profit!=0){
-                //     Log::debug("{$user->title}\t#{$deal->id} {$deal->instrument->title}\tvolume[{$tradeAmount}x{$deal->multiplier}/ {$lot}]: {$volume} pipCounts[{$price} - {$deal->close_price} / {$pips}]: {$pipsCount} cross: {$crossExchange} min: ".self::$minMove." profit: {$profit}");
-                //     $account->amount+=$profit;
-                //     $account->save();
-                // }
-                // Log::debug('Forex #'.$dealInput->id.' lot: '.$lot.' cross: '.$crossExchange.' volume: '.($tradeAmount*$deal->multiplier).' pips: '.($deal->direction*(floatval($price)-floatval($deal->close_price))).' trade:'.$profit.' Balance: '.$account->amount);
-                $dealController = new \App\Http\Controllers\DealController();
-                if($deal->stop_low>0){
-                    if($direction > 0 && $price<=$deal->stop_low){
-                        $deal->status_id = 20;
-                        $dealController->closeDeal($user,$deal,$price,'Stop lost signal');
-                    }
-                    else if($direction < 0 && $price>=$deal->stop_low){
-                        $deal->status_id = 20;
-                        $dealController->closeDeal($user,$deal,$price,'Stop lost signal');
+            }
+            if($invested+$profit < $stopOut){
+                //stopOut Event
+                $dealController->closeDeal($user,$deal,$price,'Stopout signal');
+            }
+            $deal->save();
+            //autoclose tune
+            if($deal->status_id == 20){
+                $userMeta = UserMeta::byUser($user)->meta('user_tune_corida_#'.$deal->instrument_id)->first();
+                if(!is_null($userMeta) && $userMeta !== false) {
+                    //autoclose deal
+                    $tune = json_decode($userMeta->meta_value);
+                    if(isset($tune->riskon)) {
+                        $tune->riskon=0;
+                        $userMeta->update(['meta_value'=>json_encode($tune)]);
                     }
                 }
-                if($deal->stop_high>0){
-                    if($direction > 0 && $price>=$deal->stop_high ){
-                        $deal->status_id = 20;
-                        $dealController->closeDeal($user,$deal,$price,'Take profit signal');
-                    }
-                    else if($direction < 0 && $price<=$deal->stop_high ){
-                        $deal->status_id = 20;
-                        $dealController->closeDeal($user,$deal,$price,'Take profit signal');
-                    }
-                }
-                $deal->save();
-                //autoclose tune
-                if($deal->status_id == 20){
-                    $userMeta = UserMeta::byUser($user)->meta('user_tune_corida_#'.$deal->instrument_id)->first();
-                    if(!is_null($userMeta) && $userMeta !== false) {
-                        //autoclose deal
-                        $tune = json_decode($userMeta->meta_value);
-                        if(isset($tune->riskon)) {
-                            $tune->riskon=0;
-                            $userMeta->update(['meta_value'=>json_encode($tune)]);
-                        }
-                    }
-                    UserHistory::create(['user_id'=>$user->id,'type'=>'deal.drop','object_id'=>$deal->id,'object_type'=>'deal','description'=>$dealDescription ]);
-                    $deal->events()->create(['type'=>'close','user_id'=>$deal->user_id]);
-                }
+                UserHistory::create(['user_id'=>$user->id,'type'=>'deal.drop','object_id'=>$deal->id,'object_type'=>'deal','description'=>$dealDescription ]);
+                $deal->events()->create(['type'=>'close','user_id'=>$deal->user_id]);
             }
         }
-        catch(\Exception $e){
-            DB::rollback();
-            Log::error($e);
-        }
-        DB::commit();
     }
     public static function usual(Deal $dealInput,$tick){
         DB::beginTransaction();
@@ -193,7 +188,7 @@ class DealMechanic{
                 DB::commit();
                 return;
             }
-            if($deal->status_id==20) {
+            if($deal->status_id==30) {
                 DB::commit();
                 return;
             }
@@ -292,6 +287,22 @@ class DealMechanic{
             Log::error($e);
         }
         DB::commit();
+    }
+    protected static function userMargin(User $user){
+        $response = [
+            "balance"=>0,
+            "funds"=>0,
+            "margin"=>0,
+            "marginNoLeverage"=>0,
+            "marginFree"=>0,
+            "marginCall"=>0,
+            "marginLevel"=>0,
+            "stopOut"=>0,
+            "stopOutPercent"=>0,
+        ];
+        foreach ($user->deal as $trade) {
+
+        }
     }
 };
 ?>

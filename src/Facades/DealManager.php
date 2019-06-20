@@ -1,5 +1,5 @@
 <?php
-namespace Vsb;
+namespace Vsb\Facades;
 
 use Log;
 use Cookie;
@@ -18,14 +18,15 @@ use App\Account;
 use App\Instrument;
 use App\InstrumentGroup;
 use App\Events\UserStateEvent;
-use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Auth;
+
 use App\Http\Controllers\TransactionController;
 use App\Http\Controllers\UserController;
-use Illuminate\Database\Eloquent\ModelNotFoundException;
 
-class DealManager{
-    public  function openDeal($user,$data){
+use Illuminate\Database\Eloquent\ModelNotFoundException;
+use Illuminate\Support\Facades\Facade;
+
+class DealManager extends Facade {
+    public  function openDeal(User $user,$data){
         $dealType = 'xcryptex';
         $atprice = isset($data["atprice"])?$data["atprice"]:0;
         $amount = floatval (isset($data["amount"])?$data["amount"]:0);
@@ -34,7 +35,7 @@ class DealManager{
         $multiplier = isset($data['multiplier'])?$data['multiplier']:1;
         $direction = isset($data['direction'])?$data['direction']:1;
         $creditData = null;
-        $canTrade = $user->meta()->where('meta_name','can_trade')->first();
+        $canTrade = UserMeta::where('user_id',$user->id)->where('meta_name','can_trade')->first();
         $canTrade = is_null($canTrade)?false:($canTrade->meta_value=="true" || $canTrade->meta_value=="1");
         if(!$canTrade){
             return response()->json([
@@ -65,11 +66,10 @@ class DealManager{
         $volume = isset($data['volume'])?$data['volume']:0;
         if($isforex){
             $dealType = 'forex';
-            $price = Price::where('instrument_id',$pair->id)->where('source_id',$pair->source_id)->orderBy('id','desc')->first();
-            $utp = UserTunePrice::where('price_id',is_null($price)?0:$price->id)->where('user_id',$user->id)->first();
-            $price = (!is_null($utp) && floatval($utp->price)>0)?$utp:$price;
+            $utp = UserTunePrice::where('time','>',time()-3*60*60)->where('user_id',$user->id)->orderBy('id','desc')->first();
+            $price = (!is_null($utp) && floatval($utp->price)>0)?floatval($utp->price):floatval($pair->price);
 
-            if(is_null($price)){
+            if($price<=0){
                 return response()->json([
                     "error"=>"1",
                     'code'=>'500',
@@ -77,12 +77,19 @@ class DealManager{
                 ],500,['Content-Type' => 'application/json; charset=utf-8'],JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT);
             }
             $spread = ($direction==1)
-                ?(1+floatval($pair->spread_buy)/100)
-                :(1-floatval($pair->spread_sell)/100);
-            $cur_price = floatval($price->price)
-                *$spread;
+                ?(1+floatval($ig->spread_buy)/100)
+                :(1-floatval($ig->spread_sell)/100);
+            $cur_price = $price*$spread;
             $atprice = $cur_price;
-            $amount = $atprice*$volume*$pair->lot/$pair->pips;
+
+            $tradeAmount = Deal::where('account_id',$account->id)->whereIn('status_id',[10,30])->sum('invested');
+            if( floatval($account->amount)-floatval($tradeAmount) < $amount) return response()->json([
+                "error"=>"1",
+                'code'=>'500',
+                "message"=>__("messages.Not_enough_amount")
+            ],500,['Content-Type' => 'application/json; charset=utf-8'],JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT);
+
+            // $amount = $atprice*$volume*$pair->lot/$pair->pips;
         }
         else{
             $maxFee = $amount/2;
@@ -281,7 +288,30 @@ class DealManager{
         $dealStatus = DealStatus::where('code','close')->first();
         $instrument = Instrument::find($deal->instrument_id);
         if($deal->type=='forex'){
-            $deal->update(["status_id" => $dealStatus->id]);
+            if(in_array($deal->status_id,[10,30])){
+                $lot = floatval($deal->lot);
+                $open = floatval($deal->open_price);
+                $price = floatval($deal->close_price);
+                $volume = floatval($deal->volume);
+                $contract = $volume*$lot;
+                $direction = intval($deal->direction);
+                $profit = $direction*( ($contract*$price) - ($contract*$open) );
+
+                if($profit!=0){
+                    $trx = $this->trx->makeTransaction([
+                        'uid'=>'trdcls'.$deal->id.$deal->account_id,
+                        'account'=>$deal->account_id,
+                        'type'=> ($profit>0)?'debit':'credit',
+                        'user' => $user,
+                        'merchant'=>'1',
+                        'amount'=> $profit
+                    ]);
+                }
+                $description = ($description!==false)?$description:"Interface closed";
+                $deal->update(["status_id" => 20,"profit"=>$profit]);
+                UserHistory::create(['user_id'=>$user->id,'type'=>'deal.drop','object_id'=>$deal->id,'object_type'=>'deal','description'=>$description ]);
+                $deal->events()->create(['type'=>'close','user_id'=>$user->id]);
+            }
         }
         else{
             $makeTransactionAmount  = floatval($deal->amount);
@@ -315,17 +345,6 @@ class DealManager{
                 }
                 else if( $makeTransactionAmount <= 0 ){
                     $profit = 0 - floatval($deal->amount);
-                }
-                if($makeTransactionAmount>0) {
-                    $trx = $this->trx->makeTransaction([
-                        'uid'=>'trdcls'.$deal->id.$account->id,
-                        'account'=>$account->id,
-                        'type'=>'debit',
-                        'user' => $user,
-                        'merchant'=>'1',
-                        'amount'=> $makeTransactionAmount
-                    ]);
-
                 }
                 if( $trx !== false ) {
                     $deal->update([
@@ -408,7 +427,6 @@ class DealManager{
                     if(!is_null($fd)) $this->closeDeal($fu,$fd,$current_price);
                 }
             }
-            // $followers->delete();
         }
         UserHistory::create(['user_id'=>$user->id,'type'=>'deal.drop','object_id'=>$deal->id,'object_type'=>'deal','description'=>$description ]);
         $deal->events()->create(['type'=>'close','user_id'=>$deal->user_id]);;
