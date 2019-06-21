@@ -37,17 +37,15 @@ class DealMechanic{
         $crossExchange = 1;
         if($instrument->to->code!='USD'){
             $baseCurrency = Currency::where('code','USD')->first();
-            $cross = Instrument::where('from_currency_id',$instrument->to->id)->where('to_currency_id',$baseCurrency->id)->first();
-            if(is_null($cross)){
-                Event::create(['object_type'=>'error','object_id'=>1,'user_id'=>$deal->user_id,'type'=>'error']);
-                return;
+            if($instrument->to->code=='USD'){
+                $crossExchange = 1/floatval($cross->price);
             }
-            if(is_null($cross->price)){
-                if(is_null(Event::where('object_type','error')->where('object_id',2)->where('user_id',$deal->user_id)->where('type','error')->first()))
-                    Event::create(['object_type'=>'error','object_id'=>2,'user_id'=>$deal->user_id,'type'=>'error']);
-                return;
+            else {
+                $cross = Instrument::where('from_currency_id',$instrument->to->id)->where('to_currency_id',$baseCurrency->id)->first();
+                if(!is_null($cross)){
+                    $crossExchange = floatval($cross->price);
+                }
             }
-            $crossExchange = floatval($cross->price);
         }
         $account = Account::find($deal->account_id);
 

@@ -19,13 +19,16 @@ use App\Instrument;
 use App\InstrumentGroup;
 use App\Events\UserStateEvent;
 
-use App\Http\Controllers\TransactionController;
 use App\Http\Controllers\UserController;
 
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Support\Facades\Facade;
 
 class DealManager extends Facade {
+    protected $pm;
+    public function __construct(){
+        $this->pm = app('vsb.payments');
+    }
     public  function openDeal(User $user,$data){
         $dealType = 'xcryptex';
         $atprice = isset($data["atprice"])?$data["atprice"]:0;
@@ -81,8 +84,10 @@ class DealManager extends Facade {
                 :(1-floatval($ig->spread_sell)/100);
             $cur_price = $price*$spread;
             $atprice = $cur_price;
-
+            $amount = $volume*$pair->lot/$multiplier;
+            $profit = $direction*( ($amount*$price) - ($amount*$cur_price) );
             $tradeAmount = Deal::where('account_id',$account->id)->whereIn('status_id',[10,30])->sum('invested');
+            
             if( floatval($account->amount)-floatval($tradeAmount) < $amount) return response()->json([
                 "error"=>"1",
                 'code'=>'500',
@@ -102,7 +107,7 @@ class DealManager extends Facade {
                 'amount'=>-$amount,
             ];
             Log::debug('sm trade opening...',$creditData);
-            $trx = $this->trx->makeTransaction($creditData);
+            $trx = $this->pm->makeTransaction($creditData);
             if(!in_array($trx->code,["0","200"]))return response()->json($trx,$trx->code,['Content-Type' => 'application/json; charset=utf-8'],JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT);
             Log::debug("Looking for price ".$data["atprice"]);
             // $atprice = $data["atprice"];
@@ -125,7 +130,7 @@ class DealManager extends Facade {
             else $atprice = floatval($utp->price);
 
             if($atprice <= 0 ){
-                $this->trx->rollback($creditData);
+                $this->pm->rollback($creditData);
                 return response()->json([
                     "error"=>"1",
                     'code'=>'500',
@@ -138,7 +143,7 @@ class DealManager extends Facade {
             $fee = ($fee>$maxFee)?$maxFee:$fee;
 
             if($fee>=$amount){
-                $this->trx->rollback($creditData);
+                $this->pm->rollback($creditData);
                 return response()->json([
                     "error"=>"1",
                     'code'=>'500',
@@ -146,7 +151,7 @@ class DealManager extends Facade {
                 ],500,['Content-Type' => 'application/json; charset=utf-8'],JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT);
             }
             if($stopLost>=$amount){
-                $this->trx->rollback($creditData);
+                $this->pm->rollback($creditData);
                 return response()->json([
                     "error"=>"1",
                     'code'=>'500',
@@ -154,7 +159,7 @@ class DealManager extends Facade {
                 ],500,['Content-Type' => 'application/json; charset=utf-8'],JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT);
             }
             if($takeProfit>0 && $takeProfit<=$amount){
-                $this->trx->rollback($creditData);
+                $this->pm->rollback($creditData);
                 return response()->json([
                     "error"=>"1",
                     'code'=>'500',
@@ -170,10 +175,10 @@ class DealManager extends Facade {
                 'merchant'=>'1',
                 'amount'=>$fee,
             ];
-            $trxFee = $this->trx->createTransaction($feeData);
+            $trxFee = $this->pm->createTransaction($feeData);
             $amount -= $fee;
             if(!in_array($trxFee->code,["0","200"])){
-                $this->trx->rollback($creditData);
+                $this->pm->rollback($creditData);
                 return response()->json($trxFee,$trxFee->code,['Content-Type' => 'application/json; charset=utf-8'],JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT);
             }
 
@@ -262,7 +267,7 @@ class DealManager extends Facade {
             event( new UserStateEvent($user->id) );
         }
         catch(\Exception $e){
-            if(is_null($deal) && !is_null($creditData) && count($creditData)) $this->trx->rollback($creditData);
+            if(is_null($deal) && !is_null($creditData) && count($creditData)) $this->pm->rollback($creditData);
             if(!is_null($user)) {
                 $desc = "Try open deal: ";
                 if(isset($dealData))$desc.=json_encode($dealData);
@@ -298,7 +303,7 @@ class DealManager extends Facade {
                 $profit = $direction*( ($contract*$price) - ($contract*$open) );
 
                 if($profit!=0){
-                    $trx = $this->trx->makeTransaction([
+                    $trx = $this->pm->makeTransaction([
                         'uid'=>'trdcls'.$deal->id.$deal->account_id,
                         'account'=>$deal->account_id,
                         'type'=> ($profit>0)?'debit':'credit',
@@ -376,7 +381,7 @@ class DealManager extends Facade {
                 $makeTransactionAmount = floatval($deal->amount);
                 $trx = true;
                 if($makeTransactionAmount>0) {
-                    $trx = $this->trx->makeTransaction([
+                    $trx = $this->pm->makeTransaction([
                         'uid'=>'trdcls'.$deal->id.$account->id,
                         'account'=>$account->id,
                         'type'=>'debit',
@@ -446,14 +451,14 @@ class DealManager extends Facade {
         $profit = $dealProfit+$amount;
         $invested = floatval($deal->invested);
         if($profit>0){
-            $this->trx->makeTransaction([
+            $this->pm->makeTransaction([
                 'account'=>$deal->account_id,
                 'type'=>'return',
                 'user' => $user,
                 'merchant'=>'1',
                 'amount'=> $invested
             ]);
-            $this->trx->makeTransaction([
+            $this->pm->makeTransaction([
                 'account'=>$deal->account_id,
                 'type'=>'credit',
                 'user' => $user,

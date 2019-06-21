@@ -14,8 +14,8 @@ use App\User;
 use App\UserMeta;
 use App\Source;
 use App\Events\PriceEvent;
-use cryptofx\DealMechanic;
-use cryptofx\DataTune;
+use Vsb\DealMechanic;
+use Vsb\DataTune;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Contracts\Queue\ShouldQueue;
 
